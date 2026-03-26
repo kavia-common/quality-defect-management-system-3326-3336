@@ -58,6 +58,11 @@ def get_full_url(request):
 @csrf_exempt
 def dynamic_schema_view(request, *args, **kwargs):
     url = get_full_url(request)
+    # NOTE:
+    # drf-yasg's get_schema_view does not support a `tags=` kwarg (varies by version),
+    # and passing it causes `/docs/` to 500 with:
+    #   TypeError: get_schema_view() got an unexpected keyword argument 'tags'
+    # Keeping the dynamic `url=` behavior for correct server URL generation behind proxies.
     view = get_schema_view(
         openapi.Info(
             title="Quality Defect Management API",
@@ -67,7 +72,6 @@ def dynamic_schema_view(request, *args, **kwargs):
         public=True,
         url=url,
         permission_classes=(permissions.AllowAny,),
-        tags=openapi_tags,
     )
     return view.with_ui("swagger", cache_timeout=0)(request)
 
