@@ -40,12 +40,28 @@ class Defect(models.Model):
         HIGH = "high", "High"
         URGENT = "urgent", "Urgent"
 
+    class DefectType(models.TextChoices):
+        """Defect classification used for logging/analytics."""
+        DIMENSIONAL = "dimensional", "Dimensional"
+        COSMETIC = "cosmetic", "Cosmetic"
+        FUNCTIONAL = "functional", "Functional"
+        LABELING = "labeling", "Labeling"
+        PACKAGING = "packaging", "Packaging"
+        OTHER = "other", "Other"
+
     defect_key = models.CharField(max_length=64, unique=True, null=True, blank=True)
     title = models.TextField()
     description = models.TextField(blank=True)
     severity = models.CharField(max_length=16, choices=Severity.choices, default=Severity.MEDIUM)
     priority = models.CharField(max_length=16, choices=Priority.choices, default=Priority.MEDIUM)
     status = models.ForeignKey(WorkflowStatus, on_delete=models.PROTECT, related_name="defects")
+
+    # Additional logging fields (acceptance criteria)
+    part_number = models.CharField(max_length=128, blank=True, default="")
+    defect_type = models.CharField(max_length=32, choices=DefectType.choices, blank=True, default="")
+    quantity_affected = models.IntegerField(null=True, blank=True, validators=[MinValueValidator(0)])
+    production_line = models.CharField(max_length=128, blank=True, default="")
+    shift = models.CharField(max_length=64, blank=True, default="")
 
     reported_by = models.TextField(blank=True)
     assigned_to = models.TextField(blank=True)

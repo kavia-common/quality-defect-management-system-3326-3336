@@ -185,23 +185,43 @@ class DefectViewSet(viewsets.ModelViewSet):
         if getattr(from_status, "id", None) == to_status.id:
             return Response({"detail": "Defect already in that status."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Root-cause gating: block transitions to "action/verification/closed" unless root cause is present.
-        # We consider these stages: ACTIONS_IN_PROGRESS, PENDING_VERIFICATION, VERIFIED, CLOSED.
-        # (For compatibility, support alternative codes if teams created them.)
-        needs_root_cause_codes = {"ACTIONS_IN_PROGRESS", "PENDING_VERIFICATION", "VERIFIED", "CLOSED"}
-        if to_status.code in needs_root_cause_codes and not _defect_has_root_cause(defect):
+        # Acceptance workflow enforcement (authoritative requirements):
+        # Open -> In Analysis -> Actions In Progress -> Closed
+        #
+        # - Root cause must be filled before "In Analysis"
+        # - At least one corrective action must exist before "Actions In Progress"
+        # - All actions must be completed before "Closed"
+        #
+        # NOTE: Frontend also gates these transitions for UX, but backend remains the source of truth.
+
+        # Root-cause gating for entering IN_ANALYSIS.
+        if to_status.code == "IN_ANALYSIS" and not _defect_has_root_cause(defect):
             return Response(
                 {
                     "detail": (
-                        "Root cause is required before moving beyond analysis. "
-                        "Please complete the 5-Why and root cause statement first."
+                        "Root Cause Analysis is required before moving to In Analysis. "
+                        "Please complete the 5-Why fields and root cause summary first."
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Closure gating: block terminal status unless actions exist and all are completed.
-        if to_status.is_terminal or to_status.code == "CLOSED":
+        # Actions gating for entering ACTIONS_IN_PROGRESS.
+        if to_status.code == "ACTIONS_IN_PROGRESS":
+            total_actions = CorrectiveAction.objects.filter(defect=defect).count()
+            if total_actions <= 0:
+                return Response(
+                    {
+                        "detail": (
+                            "At least one corrective action is required before moving to Actions In Progress. "
+                            "Please create a corrective action first."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Closure gating for CLOSED (and for terminal statuses if any are used as closure).
+        if to_status.code == "CLOSED" or to_status.is_terminal:
             done, total = _defect_actions_completion(defect)
             if total <= 0:
                 return Response(
@@ -293,6 +313,12 @@ class DefectViewSet(viewsets.ModelViewSet):
                 "priority",
                 "status_code",
                 "status_name",
+                # Additional defect logging fields (acceptance criteria)
+                "part_number",
+                "defect_type",
+                "quantity_affected",
+                "production_line",
+                "shift",
                 "reported_by",
                 "assigned_to",
                 "area",
@@ -326,6 +352,11 @@ class DefectViewSet(viewsets.ModelViewSet):
                     d.priority,
                     d.status.code if d.status_id else "",
                     d.status.name if d.status_id else "",
+                    d.part_number or "",
+                    d.defect_type or "",
+                    d.quantity_affected if d.quantity_affected is not None else "",
+                    d.production_line or "",
+                    d.shift or "",
                     d.reported_by or "",
                     d.assigned_to or "",
                     d.area or "",
