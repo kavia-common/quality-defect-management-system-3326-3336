@@ -336,8 +336,10 @@ class DefectViewSet(viewsets.ModelViewSet):
 
         # Ensure we don't explode queries:
         # - use iterator for defects
+        # - when the base queryset uses prefetch_related (as this ViewSet does),
+        #   Django requires an explicit chunk_size for iterator().
         # - per row we do 2 simple counts (acceptable for hackathon scale)
-        for d in qs.iterator():
+        for d in qs.iterator(chunk_size=2000):
             done, total = _defect_actions_completion(d)
             root_cause = ""
             if hasattr(d, "five_why") and d.five_why is not None:
