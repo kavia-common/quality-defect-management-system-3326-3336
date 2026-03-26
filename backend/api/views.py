@@ -24,6 +24,66 @@ from .serializers import (
 )
 
 
+def _pick_status_by_codes(codes: list[str]) -> WorkflowStatus | None:
+    """Pick the first active WorkflowStatus matching any of the provided codes (in order)."""
+    if not codes:
+        return None
+    for code in codes:
+        obj = WorkflowStatus.objects.filter(code=code, is_active=True).first()
+        if obj:
+            return obj
+    return None
+
+
+def _defect_has_root_cause(defect: Defect) -> bool:
+    """Return True if the defect has a 5-Why analysis with non-empty root_cause."""
+    if not hasattr(defect, "five_why") or defect.five_why is None:
+        return False
+    return bool((defect.five_why.root_cause or "").strip())
+
+
+def _defect_actions_completion(defect: Defect) -> tuple[int, int]:
+    """Return (done_count, total_count) for the defect's actions."""
+    total = CorrectiveAction.objects.filter(defect=defect).count()
+    done = CorrectiveAction.objects.filter(defect=defect, status=CorrectiveAction.Status.DONE).count()
+    return done, total
+
+
+def _auto_advance_defect_based_on_actions(defect: Defect, *, actor: str = "system") -> None:
+    """
+    Advance defect status if business rules are met:
+    - If defect has actions and all are done => move to VERIFIED (if exists) else PENDING_VERIFICATION.
+    """
+    done, total = _defect_actions_completion(defect)
+    if total <= 0:
+        return
+    if done != total:
+        return
+
+    # Prefer VERIFIED (matches existing seed), else use PENDING_VERIFICATION.
+    to_status = _pick_status_by_codes(["VERIFIED", "PENDING_VERIFICATION"])
+    if not to_status or defect.status_id == to_status.id:
+        return
+
+    from_status = defect.status
+    defect.status = to_status
+    defect.updated_at = timezone.now()
+    if to_status.is_terminal:
+        defect.closed_at = defect.closed_at or timezone.now()
+    else:
+        defect.closed_at = None
+    defect.save(update_fields=["status", "updated_at", "closed_at"])
+
+    DefectHistory.objects.create(
+        defect=defect,
+        event_type=DefectHistory.EventType.STATUS_CHANGE,
+        message="All corrective actions completed; defect advanced automatically.",
+        from_status=from_status,
+        to_status=to_status,
+        actor=actor,
+    )
+
+
 @api_view(["GET"])
 def health(request):
     """Health check endpoint."""
@@ -38,16 +98,22 @@ class WorkflowStatusViewSet(viewsets.ModelViewSet):
 
 
 class DefectViewSet(viewsets.ModelViewSet):
-    """CRUD for defects + custom actions for status transitions, overdue queries, and CSV export."""
+    """
+    CRUD for defects + workflow transitions, overdue queries, and CSV export.
 
-    queryset = Defect.objects.select_related("status").all().prefetch_related("actions")
+    Acceptance-criteria enforcement:
+    - Root cause must be present before moving beyond "In Analysis".
+      (We interpret "beyond Open" as progressing out of analysis into action/closure stages.)
+    - Prevent closure unless at least one corrective action exists and all actions are completed.
+    """
+
+    queryset = Defect.objects.select_related("status").all().prefetch_related("actions", "five_why")
     serializer_class = DefectSerializer
 
     def get_queryset(self):
         qs = super().get_queryset()
 
         # Optional filters for frontend convenience:
-        # ?status=NEW or ?status_id=1
         status_code = self.request.query_params.get("status")
         status_id = self.request.query_params.get("status_id")
         severity = self.request.query_params.get("severity")
@@ -72,12 +138,24 @@ class DefectViewSet(viewsets.ModelViewSet):
 
         return qs
 
+    def perform_update(self, serializer):
+        """
+        Override update to keep updated_at consistent.
+        We intentionally do not allow arbitrary nested writes in this endpoint.
+        """
+        serializer.save(updated_at=timezone.now())
+        # No automatic gating here; gating is enforced on transition endpoint.
+
     @swagger_auto_schema(
         method="post",
-        operation_summary="Transition defect status",
+        operation_summary="Transition defect status (workflow-enforced)",
         operation_description=(
             "Performs a workflow transition for a defect by status code.\n\n"
-            "Business rules:\n"
+            "Acceptance rules:\n"
+            "- Root cause must exist before moving beyond analysis into action/verification/closure stages.\n"
+            "- You cannot transition to a terminal/closed status unless:\n"
+            "  (1) at least one corrective action exists, and\n"
+            "  (2) all actions are marked DONE.\n"
             "- Only active statuses can be transitioned to.\n"
             "- When transitioning to a terminal status, defect.closed_at is set.\n"
             "- When transitioning from a terminal to non-terminal status, defect.closed_at is cleared."
@@ -104,9 +182,37 @@ class DefectViewSet(viewsets.ModelViewSet):
             )
 
         from_status = defect.status
-        if from_status_id := getattr(from_status, "id", None):
-            if from_status_id == to_status.id:
-                return Response({"detail": "Defect already in that status."}, status=status.HTTP_400_BAD_REQUEST)
+        if getattr(from_status, "id", None) == to_status.id:
+            return Response({"detail": "Defect already in that status."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Root-cause gating: block transitions to "action/verification/closed" unless root cause is present.
+        # We consider these stages: ACTIONS_IN_PROGRESS, PENDING_VERIFICATION, VERIFIED, CLOSED.
+        # (For compatibility, support alternative codes if teams created them.)
+        needs_root_cause_codes = {"ACTIONS_IN_PROGRESS", "PENDING_VERIFICATION", "VERIFIED", "CLOSED"}
+        if to_status.code in needs_root_cause_codes and not _defect_has_root_cause(defect):
+            return Response(
+                {
+                    "detail": (
+                        "Root cause is required before moving beyond analysis. "
+                        "Please complete the 5-Why and root cause statement first."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Closure gating: block terminal status unless actions exist and all are completed.
+        if to_status.is_terminal or to_status.code == "CLOSED":
+            done, total = _defect_actions_completion(defect)
+            if total <= 0:
+                return Response(
+                    {"detail": "At least one corrective action is required before closing a defect."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if done != total:
+                return Response(
+                    {"detail": f"All corrective actions must be completed before closure. ({done}/{total} done)"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         defect.status = to_status
         defect.updated_at = timezone.now()
@@ -114,10 +220,9 @@ class DefectViewSet(viewsets.ModelViewSet):
         if to_status.is_terminal:
             defect.closed_at = defect.closed_at or timezone.now()
         else:
-            # Reopening
             defect.closed_at = None
 
-        defect.save()
+        defect.save(update_fields=["status", "updated_at", "closed_at"])
 
         DefectHistory.objects.create(
             defect=defect,
@@ -173,8 +278,10 @@ class DefectViewSet(viewsets.ModelViewSet):
     def export_csv(self, request):
         qs = self.get_queryset().select_related("status")
 
-        response = HttpResponse(content_type="text/csv")
+        # IMPORTANT: set proper content type and attachment disposition for immediate download.
+        response = HttpResponse(content_type="text/csv; charset=utf-8")
         response["Content-Disposition"] = 'attachment; filename="defects.csv"'
+        response["X-Content-Type-Options"] = "nosniff"
 
         writer = csv.writer(response)
         writer.writerow(
@@ -195,10 +302,21 @@ class DefectViewSet(viewsets.ModelViewSet):
                 "closed_at",
                 "created_at",
                 "updated_at",
+                "root_cause",
+                "actions_total",
+                "actions_done",
             ]
         )
 
+        # Ensure we don't explode queries:
+        # - use iterator for defects
+        # - per row we do 2 simple counts (acceptable for hackathon scale)
         for d in qs.iterator():
+            done, total = _defect_actions_completion(d)
+            root_cause = ""
+            if hasattr(d, "five_why") and d.five_why is not None:
+                root_cause = (d.five_why.root_cause or "").strip()
+
             writer.writerow(
                 [
                     d.id,
@@ -212,11 +330,14 @@ class DefectViewSet(viewsets.ModelViewSet):
                     d.assigned_to or "",
                     d.area or "",
                     d.source or "",
-                    d.occurred_at.isoformat() if d.occurred_at else "",
-                    d.due_date.isoformat() if d.due_date else "",
+                    d.occurred_at.date().isoformat() if d.occurred_at else "",
+                    d.due_date.date().isoformat() if d.due_date else "",
                     d.closed_at.isoformat() if d.closed_at else "",
                     d.created_at.isoformat() if d.created_at else "",
                     d.updated_at.isoformat() if d.updated_at else "",
+                    root_cause,
+                    total,
+                    done,
                 ]
             )
 
@@ -229,13 +350,11 @@ class FiveWhyAnalysisViewSet(
     mixins.CreateModelMixin,
     viewsets.GenericViewSet,
 ):
-    """Create/update/retrieve 5-Why analysis for a defect.
+    """
+    Create/update/retrieve 5-Why analysis for a defect.
 
-    Supports:
-    - POST /five-whys/ with {"defect_id": ..., ...} to create (one per defect)
-    - GET /five-whys/{id}/
-    - PUT/PATCH /five-whys/{id}/
-    - PUT/PATCH /defects/{id}/five-why/ via DefectViewSet (preferred)
+    Acceptance rules:
+    - After saving 5-Why, defect is automatically moved to "IN_ANALYSIS" if currently NEW/TRIAGED.
     """
 
     queryset = FiveWhyAnalysis.objects.select_related("defect").all()
@@ -244,14 +363,18 @@ class FiveWhyAnalysisViewSet(
     @swagger_auto_schema(
         method="put",
         operation_summary="Upsert 5-Why analysis for defect",
-        operation_description="Creates or updates the defect's 5-Why analysis in a single call.",
+        operation_description=(
+            "Creates or updates the defect's 5-Why analysis in a single call.\n\n"
+            "Side effects:\n"
+            "- If the defect is in NEW/TRIAGED and analysis is saved, defect is moved to IN_ANALYSIS automatically."
+        ),
         request_body=FiveWhyAnalysisSerializer,
         responses={200: FiveWhyAnalysisSerializer},
         tags=["analysis"],
     )
     @action(detail=False, methods=["put"], url_path=r"by-defect/(?P<defect_id>\d+)")
     def upsert_by_defect(self, request, defect_id: str):
-        defect = Defect.objects.filter(id=defect_id).first()
+        defect = Defect.objects.select_related("status").filter(id=defect_id).first()
         if not defect:
             return Response({"detail": "Defect not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -265,26 +388,48 @@ class FiveWhyAnalysisViewSet(
 
         if obj:
             analysis = serializer.save(updated_at=timezone.now())
-            event_type = DefectHistory.EventType.ANALYSIS_UPDATE
             message = "5-Why analysis updated"
         else:
             analysis = serializer.save(defect=defect)
-            event_type = DefectHistory.EventType.ANALYSIS_UPDATE
             message = "5-Why analysis created"
 
         DefectHistory.objects.create(
             defect=defect,
-            event_type=event_type,
+            event_type=DefectHistory.EventType.ANALYSIS_UPDATE,
             message=message,
             actor=request.data.get("created_by", "") or "",
         )
+
+        # Auto-move defect to IN_ANALYSIS after saving analysis (as requested).
+        in_analysis = _pick_status_by_codes(["IN_ANALYSIS"])
+        if in_analysis and defect.status and defect.status.code in {"NEW", "TRIAGED"} and defect.status_id != in_analysis.id:
+            from_status = defect.status
+            defect.status = in_analysis
+            defect.updated_at = timezone.now()
+            defect.closed_at = None
+            defect.save(update_fields=["status", "updated_at", "closed_at"])
+            DefectHistory.objects.create(
+                defect=defect,
+                event_type=DefectHistory.EventType.STATUS_CHANGE,
+                message="Moved to IN_ANALYSIS after saving 5-Why analysis.",
+                from_status=from_status,
+                to_status=in_analysis,
+                actor="system",
+            )
+
         return Response(self.get_serializer(analysis).data)
 
 
 class CorrectiveActionViewSet(viewsets.ModelViewSet):
-    """CRUD for corrective actions with overdue/summary helpers."""
+    """
+    CRUD for corrective actions with overdue helpers.
 
-    queryset = CorrectiveAction.objects.select_related("defect").all()
+    Acceptance rules:
+    - Allow marking action as completed (status DONE, completed_at auto-set).
+    - When all actions for a defect are completed, defect status advances automatically.
+    """
+
+    queryset = CorrectiveAction.objects.select_related("defect", "defect__status").all()
     serializer_class = CorrectiveActionSerializer
 
     def get_queryset(self):
@@ -313,6 +458,7 @@ class CorrectiveActionViewSet(viewsets.ModelViewSet):
             message=f"Action updated: {action_obj.title}",
             actor=self.request.data.get("actor", "") or "",
         )
+        _auto_advance_defect_based_on_actions(action_obj.defect, actor="system")
 
     def perform_create(self, serializer):
         action_obj: CorrectiveAction = serializer.save()
@@ -322,6 +468,26 @@ class CorrectiveActionViewSet(viewsets.ModelViewSet):
             message=f"Action created: {action_obj.title}",
             actor=self.request.data.get("actor", "") or "",
         )
+
+        # If there is an action created, encourage workflow movement:
+        # Move IN_ANALYSIS -> ACTIONS_IN_PROGRESS automatically when first action is added (if statuses exist).
+        actions_in_progress = _pick_status_by_codes(["ACTIONS_IN_PROGRESS"])
+        if actions_in_progress and action_obj.defect.status and action_obj.defect.status.code == "IN_ANALYSIS":
+            from_status = action_obj.defect.status
+            action_obj.defect.status = actions_in_progress
+            action_obj.defect.updated_at = timezone.now()
+            action_obj.defect.closed_at = None
+            action_obj.defect.save(update_fields=["status", "updated_at", "closed_at"])
+            DefectHistory.objects.create(
+                defect=action_obj.defect,
+                event_type=DefectHistory.EventType.STATUS_CHANGE,
+                message="Moved to ACTIONS_IN_PROGRESS after adding first corrective action.",
+                from_status=from_status,
+                to_status=actions_in_progress,
+                actor="system",
+            )
+
+        _auto_advance_defect_based_on_actions(action_obj.defect, actor="system")
 
     @swagger_auto_schema(
         method="get",
@@ -394,11 +560,7 @@ class DashboardViewSet(viewsets.ViewSet):
             .count()
         )
 
-        by_status_qs = (
-            Defect.objects.values("status__code")
-            .annotate(c=Count("id"))
-            .order_by()
-        )
+        by_status_qs = Defect.objects.values("status__code").annotate(c=Count("id")).order_by()
         by_status = {row["status__code"] or "UNKNOWN": row["c"] for row in by_status_qs}
 
         by_severity_qs = Defect.objects.values("severity").annotate(c=Count("id")).order_by()
