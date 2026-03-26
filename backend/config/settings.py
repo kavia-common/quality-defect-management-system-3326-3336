@@ -85,18 +85,26 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 # SQLite DB alignment
-# By default, use the database container's canonical DB file so backend + database viewer operate on the same data.
+# By default, use the *database* workspace's canonical DB file so backend + database viewer
+# operate on the same data.
+#
 # You can override this path via SQLITE_DB_PATH (absolute or relative).
 #
-# Required env var (optional):
+# Optional env var:
 # - SQLITE_DB_PATH: Path to SQLite database file (e.g., /abs/path/to/myapp.db)
-_default_sqlite_path = (BASE_DIR.parent / 'database' / 'myapp.db').resolve()
-SQLITE_DB_PATH = Path(os.environ.get('SQLITE_DB_PATH', str(_default_sqlite_path))).expanduser()
+#
+# NOTE:
+# Repos are split into multiple workspaces (frontend/backend/database). The canonical
+# SQLite file lives under quality-defect-management-system-3326-3337/database/myapp.db.
+_default_sqlite_path = (
+    BASE_DIR.parent.parent / "quality-defect-management-system-3326-3337" / "database" / "myapp.db"
+).resolve()
+SQLITE_DB_PATH = Path(os.environ.get("SQLITE_DB_PATH", str(_default_sqlite_path))).expanduser()
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': str(SQLITE_DB_PATH),
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": str(SQLITE_DB_PATH),
     }
 }
 
