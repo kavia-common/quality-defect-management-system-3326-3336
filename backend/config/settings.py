@@ -150,7 +150,26 @@ STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-CORS_ALLOW_ALL_ORIGINS = True
+# CORS
+# The frontend is served on a different origin (port 3000) than the backend API (port 3001).
+# Browser fetch() will fail with "TypeError: Failed to fetch" if CORS is not configured correctly,
+# especially when requests include credentials (cookies).
+#
+# We avoid CORS_ALLOW_ALL_ORIGINS with credentials because browsers will reject
+# `Access-Control-Allow-Origin: *` when `credentials: include` is used.
+CORS_ALLOW_CREDENTIALS = True
+
+# Allow local/dev + Kavia hosted origins. Regex allows any vscode-internal-*.kavia.ai subdomain.
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://localhost:3000",
+    "https://127.0.0.1:3000",
+]
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://.*\.kavia\.ai(?::\d+)?$",
+]
+
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 USE_X_FORWARDED_HOST = True
 X_FRAME_OPTIONS = 'ALLOWALL'
