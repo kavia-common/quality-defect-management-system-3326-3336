@@ -50,15 +50,14 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.security.SecurityMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    "corsheaders.middleware.CorsMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -152,12 +151,17 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # CORS
 # The frontend is served on a different origin (port 3000) than the backend API (port 3001).
-# Browser fetch() will fail with "TypeError: Failed to fetch" if CORS is not configured correctly,
-# especially when requests include credentials (cookies).
 #
-# We avoid CORS_ALLOW_ALL_ORIGINS with credentials because browsers will reject
-# `Access-Control-Allow-Origin: *` when `credentials: include` is used.
-CORS_ALLOW_CREDENTIALS = True
+# Performance note:
+# Credentialed CORS (cookies/Authorization across origins) typically triggers stricter handling
+# and more frequent preflights in browsers/proxies. Our frontend does NOT require cross-origin
+# cookies by default (it uses `credentials: "same-origin"`), so we keep this OFF unless explicitly
+# needed.
+#
+# If a future deployment needs cookie-based auth across origins, set:
+#   CORS_ALLOW_CREDENTIALS=true
+# and ensure allowed origins are explicitly listed (not "*").
+CORS_ALLOW_CREDENTIALS = os.environ.get("CORS_ALLOW_CREDENTIALS", "false").strip().lower() in ("1", "true", "yes")
 
 # Allow local/dev + Kavia hosted origins. Regex allows any vscode-internal-*.kavia.ai subdomain.
 CORS_ALLOWED_ORIGINS = [
