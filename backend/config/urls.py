@@ -26,11 +26,20 @@ urlpatterns = [
     path('api/', include('api.urls')),
 ]
 
+openapi_tags = [
+    {"name": "health", "description": "Service health check"},
+    {"name": "defects", "description": "Defect CRUD, workflow transitions, overdue lists, CSV export"},
+    {"name": "analysis", "description": "5-Why root cause analysis endpoints"},
+    {"name": "actions", "description": "Corrective action CRUD and overdue queries"},
+    {"name": "dashboard", "description": "Dashboard aggregate metrics for UI"},
+    {"name": "export", "description": "CSV export endpoints"},
+]
+
 schema_view = get_schema_view(
    openapi.Info(
-      title="My API",
+      title="Quality Defect Management API",
       default_version='v1',
-      description="Test description",
+      description="REST API for tracking quality defects, root cause (5-Why), corrective actions, workflow, metrics, and export.",
    ),
    public=True,
    permission_classes=(permissions.AllowAny,),
@@ -51,17 +60,19 @@ def dynamic_schema_view(request, *args, **kwargs):
     url = get_full_url(request)
     view = get_schema_view(
         openapi.Info(
-            title="My API",
-            default_version='v1',
-            description="API Docs",
+            title="Quality Defect Management API",
+            default_version="v1",
+            description="REST API documentation (Swagger UI).",
         ),
         public=True,
         url=url,
+        permission_classes=(permissions.AllowAny,),
+        tags=openapi_tags,
     )
-    return view.with_ui('swagger', cache_timeout=0)(request)
+    return view.with_ui("swagger", cache_timeout=0)(request)
 
 urlpatterns += [
-    re_path(r'^docs/$', dynamic_schema_view, name='schema-swagger-ui'),
-    re_path(r'^redoc/$', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
-    re_path(r'^swagger\.json$', schema_view.without_ui(cache_timeout=0), name='schema-json'),
+    re_path(r"^docs/$", dynamic_schema_view, name="schema-swagger-ui"),
+    re_path(r"^redoc/$", schema_view.with_ui("redoc", cache_timeout=0), name="schema-redoc"),
+    re_path(r"^swagger\.json$", schema_view.without_ui(cache_timeout=0), name="schema-json"),
 ]
