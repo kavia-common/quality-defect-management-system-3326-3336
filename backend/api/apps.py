@@ -36,6 +36,10 @@ class ApiConfig(AppConfig):
         from .models import Defect  # local import to avoid app-loading side effects
 
         try:
+            # Keep conventional backend path (backend/db.sqlite3) aligned with configured DB NAME.
+            # Best-effort and non-fatal: avoids "seeded the wrong file" confusion.
+            call_command("ensure_sqlite_db_link", verbosity=0)
+
             # If the DB is drifted (missing columns), even a simple count can crash.
             # Repair first; command is idempotent for SQLite.
             call_command("repair_sqlite_migrations", verbosity=0)

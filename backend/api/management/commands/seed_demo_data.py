@@ -927,6 +927,8 @@ class Command(BaseCommand):
 
             created = 0
             skipped = 0
+            created_actions = 0
+            created_analyses = 0
 
             for sd in seeds:
                 if Defect.objects.filter(defect_key=sd.defect_key).exists():
@@ -983,6 +985,7 @@ class Command(BaseCommand):
                         created_at=created_at,
                         updated_at=created_at,
                     )
+                    created_analyses += 1
                     DefectHistory.objects.create(
                         defect=defect,
                         event_type=DefectHistory.EventType.ANALYSIS_UPDATE,
@@ -1011,6 +1014,7 @@ class Command(BaseCommand):
                         created_at=created_at,
                         updated_at=created_at,
                     )
+                    created_actions += 1
                     DefectHistory.objects.create(
                         defect=defect,
                         event_type=DefectHistory.EventType.ACTION_UPDATE,
@@ -1031,7 +1035,15 @@ class Command(BaseCommand):
                 .count()
             )
 
-            self.stdout.write(self.style.SUCCESS(f"Demo seeding complete. Created={created}, skipped={skipped}."))
+            from django.conf import settings
+
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"Demo seeding complete. Created defects={created}, skipped={skipped}, "
+                    f"created analyses={created_analyses}, created actions={created_actions}."
+                )
+            )
+            self.stdout.write(self.style.SUCCESS(f"DB file: {settings.DATABASES['default']['NAME']}"))
             self.stdout.write(
                 self.style.SUCCESS(
                     f"DB totals: defects={total_defects}, open={open_defects}, closed={closed_defects}, overdue={overdue_defects}."
