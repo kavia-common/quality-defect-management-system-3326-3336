@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
+import os
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -83,10 +84,19 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
+# SQLite DB alignment
+# By default, use the database container's canonical DB file so backend + database viewer operate on the same data.
+# You can override this path via SQLITE_DB_PATH (absolute or relative).
+#
+# Required env var (optional):
+# - SQLITE_DB_PATH: Path to SQLite database file (e.g., /abs/path/to/myapp.db)
+_default_sqlite_path = (BASE_DIR.parent / 'database' / 'myapp.db').resolve()
+SQLITE_DB_PATH = Path(os.environ.get('SQLITE_DB_PATH', str(_default_sqlite_path))).expanduser()
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'NAME': str(SQLITE_DB_PATH),
     }
 }
 
